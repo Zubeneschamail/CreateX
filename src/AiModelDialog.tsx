@@ -22,6 +22,30 @@ const PANEL_MARGIN = 12;
 const PANEL_WIDTH = 420;
 const PANEL_DEFAULT_Y = 78;
 
+export type AiDetailLevel = "standard" | "high" | "ultra";
+
+const DETAIL_LEVEL_OPTIONS: Array<{
+  description: string;
+  label: string;
+  value: AiDetailLevel;
+}> = [
+  {
+    description: "更多分段和结构线，默认推荐",
+    label: "高",
+    value: "high",
+  },
+  {
+    description: "控制点面数量，适合快速草图",
+    label: "标准",
+    value: "standard",
+  },
+  {
+    description: "尽量表达轮廓、倒角和局部细节",
+    label: "极高",
+    value: "ultra",
+  },
+];
+
 type PanelPosition = {
   x: number;
   y: number;
@@ -102,8 +126,11 @@ function AiModelDialog({
   onClose,
   onModelChange,
 }: AiModelDialogProps) {
-  const [prompt, setPrompt] = useState("生成一个橙色金字塔，底面在地面，高度 2");
+  const [prompt, setPrompt] = useState(
+    "生成一个白色小房子，包含墙体、屋顶、门、窗户和烟囱",
+  );
   const [mode, setMode] = useState<ApplyAiMode>("add");
+  const [detailLevel, setDetailLevel] = useState<AiDetailLevel>("high");
   const [isLoading, setIsLoading] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -163,6 +190,9 @@ function AiModelDialog({
   const activeModel =
     modelOptions.find((option) => option.value === settings.model) ||
     modelOptions[0];
+  const activeDetailLevel =
+    DETAIL_LEVEL_OPTIONS.find((option) => option.value === detailLevel) ||
+    DETAIL_LEVEL_OPTIONS[0];
   const selectionContextSummary =
     selectionContext.points.length > 0 ||
     selectionContext.edges.length > 0 ||
@@ -208,13 +238,15 @@ function AiModelDialog({
 
     setIsLoading(true);
     setError("");
-    setMessage("正在生成模型...");
+    setMessage("正在生成高精度模型...");
 
     try {
       const response = await fetch("/api/ai-model", {
         body: JSON.stringify({
           apiKey: settings.apiKey,
           currentScene,
+          detailLevel,
+          faceLimit: settings.faceLimit,
           model: settings.model,
           prompt: trimmedPrompt,
           provider: settings.provider,
@@ -234,7 +266,7 @@ function AiModelDialog({
       const model = normalizeAiModel(payload.model);
       onApply(model, mode);
       setMessage(
-        `${model.summary}（${model.points.length} 点 / ${model.edges.length} 线 / ${model.faces.length} 面）`,
+        `${model.summary}（${model.points.length} 点 / ${model.edges.length} 线 / ${model.faces.length} 面 / ${model.solids.length} 体）`,
       );
     } catch (caughtError) {
       setError(
@@ -307,6 +339,24 @@ function AiModelDialog({
             <small>
               {activeProvider?.label} · {activeModel.description}
             </small>
+          </label>
+
+          <label className="settings-field">
+            <span>精细度</span>
+            <select
+              aria-label="AI 生成精细度"
+              onChange={(event) =>
+                setDetailLevel(event.target.value as AiDetailLevel)
+              }
+              value={activeDetailLevel.value}
+            >
+              {DETAIL_LEVEL_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <small>{activeDetailLevel.description}</small>
           </label>
 
           <p className="ai-context-note">{selectionContextSummary}</p>

@@ -3,7 +3,12 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
   ConstructionPlane,
+  DEFAULT_GEOMETRY_COLOR,
+  getEdgeById,
+  getFaceById,
   getPointById,
+  getSolidById,
+  InteractionTool,
   SceneModel,
   ShapeDraft,
   ShapeTool,
@@ -11,21 +16,30 @@ import {
   targetEquals,
   Vec3Tuple,
 } from "./model";
+import { isPrimaryModifier } from "./shortcuts";
 
 type WorkspaceProps = {
+  boxSelectShortcutLabel: string;
   constructionPlane: ConstructionPlane;
   constructionPlaneOffset: number;
   facesOnly: boolean;
   hoveredTarget: SelectionTarget | null;
+  interactionTool: InteractionTool;
   model: SceneModel;
   onBoxSelectPoints: (pointIds: string[]) => void;
+  onClearSelection: () => void;
   onCreatePoint: (position: Vec3Tuple) => void;
   onCreateShape: (shape: ShapeDraft) => void;
   onHoverTarget: (target: SelectionTarget | null) => void;
   onSelectTarget: (target: SelectionTarget) => void;
+  onTranslateSelectionCancel: () => void;
+  onTranslateSelectionEnd: (delta: Vec3Tuple) => void;
+  onTranslateSelectionMove: (delta: Vec3Tuple) => void;
+  onTranslateSelectionStart: () => boolean;
   selectedEdgeIds: string[];
   selectedFaceIds: string[];
   selectedPointIds: string[];
+  selectedTranslationPointIds: string[];
   selectedTarget: SelectionTarget | null;
   shapeTool: ShapeTool;
 };
@@ -48,13 +62,14 @@ type ThreeHandles = {
 };
 
 const POINT_RADIUS = 0.075;
+const POINT_VISIBLE_RADIUS = POINT_RADIUS / 2;
 const EDGE_RADIUS = 0.025;
+const EDGE_VISIBLE_RADIUS = EDGE_RADIUS / 2;
 const EDGE_PICK_RADIUS = 0.12;
-const BASE_POINT_COLOR = "#f8fafc";
+const BASE_POINT_COLOR = DEFAULT_GEOMETRY_COLOR;
 const SELECTED_COLOR = "#f97316";
 const HOVER_COLOR = "#38bdf8";
 const BUILD_COLOR = "#eab308";
-const EDGE_COLOR = "#d1d5db";
 const SHAPE_PREVIEW_COLOR = "#f97316";
 const SHAPE_PREVIEW_SEGMENTS = 80;
 
@@ -277,7 +292,12 @@ const makeEdgeMesh = (
 ) => {
   const direction = end.clone().sub(start);
   const length = direction.length();
-  const geometry = new THREE.CylinderGeometry(EDGE_RADIUS, EDGE_RADIUS, length, 12);
+  const geometry = new THREE.CylinderGeometry(
+    EDGE_VISIBLE_RADIUS,
+    EDGE_VISIBLE_RADIUS,
+    length,
+    12,
+  );
   const material = new THREE.MeshStandardMaterial({
     color,
     metalness: 0.08,
@@ -357,6 +377,48 @@ const pickTarget = (
   return null;
 };
 
+const getTargetPointIds = (model: SceneModel, target: SelectionTarget) => {
+  if (target.kind === "point") {
+    return [target.id];
+  }
+
+  if (target.kind === "edge") {
+    return getEdgeById(model, target.id)?.points || [];
+  }
+
+  if (target.kind === "face") {
+    return getFaceById(model, target.id)?.points || [];
+  }
+
+  const solid = getSolidById(model, target.id);
+  if (!solid) {
+    return [];
+  }
+
+  const pointIds = new Set<string>();
+  for (const faceId of solid.faces) {
+    getFaceById(model, faceId)?.points.forEach((pointId) =>
+      pointIds.add(pointId),
+    );
+  }
+
+  return [...pointIds];
+};
+
+const isTargetInSelection = (
+  model: SceneModel,
+  target: SelectionTarget,
+  selectedTranslationPointIds: string[],
+) => {
+  const selectedPointIds = new Set(selectedTranslationPointIds);
+  const targetPointIds = getTargetPointIds(model, target);
+
+  return (
+    targetPointIds.length > 0 &&
+    targetPointIds.every((pointId) => selectedPointIds.has(pointId))
+  );
+};
+
 const getBoxSelectedPointIds = (
   handles: ThreeHandles,
   model: SceneModel,
@@ -392,44 +454,67 @@ const getBoxSelectedPointIds = (
 };
 
 function Workspace3D({
+  boxSelectShortcutLabel,
   constructionPlane,
   constructionPlaneOffset,
   facesOnly,
   hoveredTarget,
+  interactionTool,
   model,
   onBoxSelectPoints,
+  onClearSelection,
   onCreatePoint,
   onCreateShape,
   onHoverTarget,
   onSelectTarget,
+  onTranslateSelectionCancel,
+  onTranslateSelectionEnd,
+  onTranslateSelectionMove,
+  onTranslateSelectionStart,
   selectedEdgeIds,
   selectedFaceIds,
   selectedPointIds,
+  selectedTranslationPointIds,
   selectedTarget,
   shapeTool,
 }: WorkspaceProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const handlesRef = useRef<ThreeHandles | null>(null);
   const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
+  const [isTranslating, setIsTranslating] = useState(false);
   const propsRef = useRef({
     constructionPlane,
+    interactionTool,
     model,
     onBoxSelectPoints,
+    onClearSelection,
     onCreatePoint,
     onCreateShape,
     onHoverTarget,
     onSelectTarget,
+    onTranslateSelectionCancel,
+    onTranslateSelectionEnd,
+    onTranslateSelectionMove,
+    onTranslateSelectionStart,
+    selectedTranslationPointIds,
     shapeTool,
   });
 
   propsRef.current = {
     constructionPlane,
+    interactionTool,
     model,
     onBoxSelectPoints,
+    onClearSelection,
     onCreatePoint,
     onCreateShape,
     onHoverTarget,
     onSelectTarget,
+    onTranslateSelectionCancel,
+    onTranslateSelectionEnd,
+    onTranslateSelectionMove,
+    onTranslateSelectionStart,
+    selectedTranslationPointIds,
     shapeTool,
   };
 
@@ -492,7 +577,8 @@ function Workspace3D({
     scene.add(planeGrid);
 
     const axes = new THREE.AxesHelper(1.4);
-    axes.position.set(-4.75, 0.01, -4.75);
+    axes.renderOrder = 3;
+    axes.position.set(0, 0, 0);
     scene.add(axes);
 
     const facesGroup = new THREE.Group();
@@ -537,6 +623,15 @@ function Workspace3D({
       center: new THREE.Vector3(),
       current: new THREE.Vector3(),
     };
+    const translationDrag = {
+      active: false,
+      hasMoved: false,
+      pointerId: -1,
+      start: new THREE.Vector3(),
+      current: new THREE.Vector3(),
+      x: 0,
+      y: 0,
+    };
     const scratchPoint = new THREE.Vector3();
     const intersectActivePlane = (
       event: PointerEvent,
@@ -557,6 +652,18 @@ function Workspace3D({
       shapeDrawing.pointerId = -1;
       controls.enabled = true;
       clearGroup(handles.previewGroup);
+    };
+    const getTranslationDelta = (): Vec3Tuple => [
+      translationDrag.current.x - translationDrag.start.x,
+      translationDrag.current.y - translationDrag.start.y,
+      translationDrag.current.z - translationDrag.start.z,
+    ];
+    const endTranslationDrag = () => {
+      translationDrag.active = false;
+      translationDrag.hasMoved = false;
+      translationDrag.pointerId = -1;
+      controls.enabled = true;
+      setIsTranslating(false);
     };
 
     const onPointerDown = (event: PointerEvent) => {
@@ -587,7 +694,49 @@ function Workspace3D({
 
       if (
         event.button === 0 &&
-        event.ctrlKey &&
+        propsRef.current.interactionTool === "select" &&
+        !isPrimaryModifier(event)
+      ) {
+        const target = pickTarget(
+          handles,
+          event,
+          renderer.domElement,
+          propsRef.current.model,
+        );
+
+        if (
+          target &&
+          isTargetInSelection(
+            propsRef.current.model,
+            target,
+            propsRef.current.selectedTranslationPointIds,
+          ) &&
+          intersectActivePlane(event, scratchPoint) &&
+          propsRef.current.onTranslateSelectionStart()
+        ) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          translationDrag.active = true;
+          translationDrag.hasMoved = false;
+          translationDrag.pointerId = event.pointerId;
+          translationDrag.start.copy(scratchPoint);
+          translationDrag.current.copy(scratchPoint);
+          translationDrag.x = event.clientX;
+          translationDrag.y = event.clientY;
+          pointerStart.x = event.clientX;
+          pointerStart.y = event.clientY;
+          pointerStart.time = window.performance.now();
+          controls.enabled = false;
+          renderer.domElement.setPointerCapture(event.pointerId);
+          setIsTranslating(true);
+          propsRef.current.onHoverTarget(target);
+          return;
+        }
+      }
+
+      if (
+        event.button === 0 &&
+        isPrimaryModifier(event) &&
         !pickTarget(handles, event, renderer.domElement, propsRef.current.model)
       ) {
         event.preventDefault();
@@ -631,6 +780,23 @@ function Workspace3D({
             radiusB,
             shapeDrawing.tool,
           );
+        }
+
+        return;
+      }
+
+      if (translationDrag.active) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+
+        const moved = Math.hypot(
+          event.clientX - translationDrag.x,
+          event.clientY - translationDrag.y,
+        );
+        translationDrag.hasMoved = translationDrag.hasMoved || moved > 2;
+
+        if (intersectActivePlane(event, translationDrag.current)) {
+          propsRef.current.onTranslateSelectionMove(getTranslationDelta());
         }
 
         return;
@@ -692,6 +858,24 @@ function Workspace3D({
         return;
       }
 
+      if (translationDrag.active) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+
+        intersectActivePlane(event, translationDrag.current);
+        const delta = getTranslationDelta();
+
+        if (renderer.domElement.hasPointerCapture(translationDrag.pointerId)) {
+          renderer.domElement.releasePointerCapture(translationDrag.pointerId);
+        }
+
+        propsRef.current.onTranslateSelectionEnd(
+          translationDrag.hasMoved ? delta : [0, 0, 0],
+        );
+        endTranslationDrag();
+        return;
+      }
+
       if (pointerStart.boxSelecting) {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -743,6 +927,12 @@ function Workspace3D({
         return;
       }
 
+      if (propsRef.current.interactionTool !== "point") {
+        propsRef.current.onClearSelection();
+        propsRef.current.onHoverTarget(null);
+        return;
+      }
+
       const ndc = pointerToNdc(event, renderer.domElement);
       raycaster.setFromCamera(ndc, camera);
 
@@ -756,6 +946,10 @@ function Workspace3D({
     };
 
     const onPointerLeave = () => {
+      if (translationDrag.active) {
+        return;
+      }
+
       if (pointerStart.boxSelecting) {
         return;
       }
@@ -770,6 +964,16 @@ function Workspace3D({
         }
 
         endShapeDrawing();
+        return;
+      }
+
+      if (translationDrag.active) {
+        if (renderer.domElement.hasPointerCapture(event.pointerId)) {
+          renderer.domElement.releasePointerCapture(event.pointerId);
+        }
+
+        propsRef.current.onTranslateSelectionCancel();
+        endTranslationDrag();
         return;
       }
 
@@ -909,7 +1113,11 @@ function Workspace3D({
           isTarget("edge", edge.id, selectedTarget) ||
           selectedEdgeIds.includes(edge.id);
         const hovered = isTarget("edge", edge.id, hoveredTarget);
-        const color = selected ? SELECTED_COLOR : hovered ? HOVER_COLOR : EDGE_COLOR;
+        const color = selected
+          ? SELECTED_COLOR
+          : hovered
+            ? HOVER_COLOR
+            : edge.color || DEFAULT_GEOMETRY_COLOR;
         const mesh = makeEdgeMesh(
           new THREE.Vector3(...startPoint.position),
           new THREE.Vector3(...endPoint.position),
@@ -930,9 +1138,9 @@ function Workspace3D({
             ? HOVER_COLOR
             : isBuildPoint
               ? BUILD_COLOR
-              : BASE_POINT_COLOR;
+              : point.color || BASE_POINT_COLOR;
         const geometry = new THREE.SphereGeometry(
-          selected || hovered ? POINT_RADIUS * 1.28 : POINT_RADIUS,
+          selected || hovered ? POINT_VISIBLE_RADIUS * 1.28 : POINT_VISIBLE_RADIUS,
           24,
           16,
         );
@@ -948,6 +1156,18 @@ function Workspace3D({
         mesh.castShadow = true;
         mesh.userData.target = makeTarget("point", point.id);
         handles.pointsGroup.add(mesh);
+
+        const hitGeometry = new THREE.SphereGeometry(POINT_RADIUS, 16, 10);
+        const hitMaterial = new THREE.MeshBasicMaterial({
+          colorWrite: false,
+          depthWrite: false,
+          transparent: true,
+        });
+        const hitMesh = new THREE.Mesh(hitGeometry, hitMaterial);
+        hitMesh.position.copy(mesh.position);
+        hitMesh.renderOrder = -1;
+        hitMesh.userData.target = makeTarget("point", point.id);
+        handles.pointsGroup.add(hitMesh);
       }
     }
   }, [
@@ -964,8 +1184,11 @@ function Workspace3D({
     <div
       className={`workspace ${selectionBox ? "is-box-selecting" : ""} ${
         shapeTool !== "none" ? "is-shape-tool" : ""
+      } ${interactionTool === "point" ? "is-point-tool" : ""} ${
+        isTranslating ? "is-translating" : ""
       }`}
       ref={rootRef}
+      title={boxSelectShortcutLabel}
     >
       {selectionBox && (
         <div

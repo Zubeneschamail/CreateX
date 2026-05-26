@@ -1,4 +1,5 @@
 import {
+  type ChangeEvent,
   type FormEvent,
   useCallback,
   useEffect,
@@ -9,11 +10,14 @@ import {
 import {
   Brush,
   Circle,
+  CirclePlus,
   Eraser,
   Eye,
   Magnet,
   Minus,
+  MousePointer2,
   Orbit,
+  PaintBucket,
   Plus,
   Radius,
   RotateCcw,
@@ -25,7 +29,11 @@ import {
 import Workspace3D from "./Workspace3D";
 import AiModelDialog, { type AiSelectionContext } from "./AiModelDialog";
 import SettingsDialog, { AiSettings } from "./SettingsDialog";
-import { AiGeneratedModel } from "./aiSchema";
+import {
+  AiGeneratedModel,
+  clampAiFaceLimit,
+  DEFAULT_AI_FACE_LIMIT,
+} from "./aiSchema";
 import { ApplyAiMode, mergeAiModelIntoScene } from "./aiModel";
 import {
   DEFAULT_AI_PROVIDER,
@@ -40,6 +48,7 @@ import {
   ConstructionPlane,
   createEdgeIfMissing,
   createPolygonFace,
+  DEFAULT_GEOMETRY_COLOR,
   deleteTarget,
   emptyModel,
   formatTuple,
@@ -49,6 +58,7 @@ import {
   getSolidById,
   hasEdgeBetween,
   hasFaceWithPoints,
+  InteractionTool,
   polygonArea,
   SceneModel,
   ShapeDraft,
@@ -58,6 +68,11 @@ import {
   targetEquals,
   Vec3Tuple,
 } from "./model";
+import {
+  getPrimaryDragLabel,
+  getPrimaryShortcutLabel,
+  isPrimaryModifier,
+} from "./shortcuts";
 
 const FACE_COLORS = [
   "#f97316",
@@ -70,13 +85,36 @@ const FACE_COLORS = [
   "#f8fafc",
 ];
 
+type RgbChannel = "r" | "g" | "b";
+
+const clampRgbChannel = (value: number) =>
+  Math.min(255, Math.max(0, Math.round(value)));
+
+const componentToHex = (value: number) =>
+  clampRgbChannel(value).toString(16).padStart(2, "0");
+
+const rgbToHex = (rgb: Record<RgbChannel, number>) =>
+  `#${componentToHex(rgb.r)}${componentToHex(rgb.g)}${componentToHex(rgb.b)}`;
+
+const hexToRgb = (color: string): Record<RgbChannel, number> => {
+  const normalizedColor = /^#[0-9a-fA-F]{6}$/.test(color)
+    ? color.slice(1)
+    : DEFAULT_GEOMETRY_COLOR.slice(1);
+
+  return {
+    b: Number.parseInt(normalizedColor.slice(4, 6), 16),
+    g: Number.parseInt(normalizedColor.slice(2, 4), 16),
+    r: Number.parseInt(normalizedColor.slice(0, 2), 16),
+  };
+};
+
 const POINT_SNAP_RADIUS = 0.18;
 const PLANE_OFFSET_STEP = 0.25;
 const PLANE_OFFSET_LIMIT = 5;
 const SHAPE_SEGMENTS = 48;
 const SHAPE_MIN_RADIUS = 0.08;
-const SPHERE_LAT_SEGMENTS = 8;
-const SPHERE_LONG_SEGMENTS = 16;
+const SPHERE_LAT_SEGMENTS = 16;
+const SPHERE_LONG_SEGMENTS = 32;
 
 const SHAPE_TOOL_LABEL: Record<Exclude<ShapeTool, "none">, string> = {
   circle: "圆",
@@ -109,6 +147,7 @@ const DEFAULT_PLANE_OFFSETS: Record<ConstructionPlane, number> = {
 const AI_SETTINGS_STORAGE_KEY = "creatorx.aiSettings";
 const DEFAULT_AI_SETTINGS: AiSettings = {
   apiKey: "",
+  faceLimit: DEFAULT_AI_FACE_LIMIT,
   model: DEFAULT_MODEL_BY_PROVIDER[DEFAULT_AI_PROVIDER],
   provider: DEFAULT_AI_PROVIDER,
 };
@@ -137,6 +176,7 @@ const loadAiSettings = (): AiSettings => {
 
     return {
       apiKey: typeof parsedValue.apiKey === "string" ? parsedValue.apiKey : "",
+      faceLimit: clampAiFaceLimit(parsedValue.faceLimit),
       model,
       provider,
     };
@@ -199,6 +239,64 @@ const ensurePolygonFace = (
   ids: string[],
   color: string,
 ) => createPolygonFace(model, ids, color) || getFaceIdByPointSet(model, ids);
+
+const getPointIdsForTarget = (model: SceneModel, target: SelectionTarget) => {
+  if (target.kind === "point") {
+    return [target.id];
+  }
+
+  if (target.kind === "edge") {
+    return getEdgeById(model, target.id)?.points || [];
+  }
+
+  if (target.kind === "face") {
+    return getFaceById(model, target.id)?.points || [];
+  }
+
+  const solid = getSolidById(model, target.id);
+  if (!solid) {
+    return [];
+  }
+
+  const pointIds = new Set<string>();
+  for (const faceId of solid.faces) {
+    getFaceById(model, faceId)?.points.forEach((pointId) =>
+      pointIds.add(pointId),
+    );
+  }
+
+  return [...pointIds];
+};
+
+const getSelectionPointIds = (
+  model: SceneModel,
+  selectedTarget: SelectionTarget | null,
+  selectedPointIds: string[],
+  selectedEdgeIds: string[],
+  selectedFaceIds: string[],
+) => {
+  const pointIds = new Set(selectedPointIds);
+
+  for (const edgeId of selectedEdgeIds) {
+    getEdgeById(model, edgeId)?.points.forEach((pointId) =>
+      pointIds.add(pointId),
+    );
+  }
+
+  for (const faceId of selectedFaceIds) {
+    getFaceById(model, faceId)?.points.forEach((pointId) =>
+      pointIds.add(pointId),
+    );
+  }
+
+  if (selectedTarget) {
+    getPointIdsForTarget(model, selectedTarget).forEach((pointId) =>
+      pointIds.add(pointId),
+    );
+  }
+
+  return [...pointIds];
+};
 
 const addTriangleFromEdgeAndPoint = (
   model: SceneModel,
@@ -345,6 +443,7 @@ const addSphereFromShape = (
   const addPoint = (position: Vec3Tuple) => {
     const pointId = `p${model.nextPointId}`;
     model.points.push({
+      color: DEFAULT_GEOMETRY_COLOR,
       id: pointId,
       position,
     });
@@ -452,6 +551,8 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [facesOnly, setFacesOnly] = useState(false);
+  const [interactionTool, setInteractionTool] =
+    useState<InteractionTool>("select");
   const [shapeTool, setShapeTool] = useState<ShapeTool>("none");
   const [constructionPlane, setConstructionPlane] =
     useState<ConstructionPlane>("xz");
@@ -461,6 +562,8 @@ function App() {
   const modelRef = useRef<SceneModel>(model);
   const historyRef = useRef<SceneModel[]>([]);
   const noticeTimerRef = useRef<number | null>(null);
+  const translationStartRef = useRef<SceneModel | null>(null);
+  const translationPointIdsRef = useRef<string[]>([]);
 
   const flashNotice = useCallback((message: string) => {
     setNotice(message);
@@ -516,10 +619,20 @@ function App() {
     flashNotice(nextEnabled ? "只显示面" : "显示点线");
   }, [clearSelection, facesOnly, flashNotice, selectedTarget]);
 
+  const chooseInteractionTool = useCallback(
+    (tool: InteractionTool) => {
+      setInteractionTool(tool);
+      setShapeTool("none");
+      flashNotice(tool === "select" ? "选择工具" : "新增点工具");
+    },
+    [flashNotice],
+  );
+
   const chooseShapeTool = useCallback(
     (tool: Exclude<ShapeTool, "none">) => {
       const nextTool = shapeTool === tool ? "none" : tool;
 
+      setInteractionTool("select");
       setShapeTool(nextTool);
       clearSelection();
       flashNotice(
@@ -674,7 +787,7 @@ function App() {
 
       clearSelection();
       flashNotice(
-        `AI 已生成 ${mergeResult.points} 点 / ${mergeResult.edges} 线 / ${mergeResult.faces} 面`,
+        `AI 已生成 ${mergeResult.points} 点 / ${mergeResult.edges} 线 / ${mergeResult.faces} 面 / ${mergeResult.solids} 体`,
       );
     },
     [clearSelection, commitModel, flashNotice],
@@ -764,7 +877,7 @@ function App() {
           draft,
           selectedFaceIds[0],
           selectedPointIds[0],
-          activeColor,
+          DEFAULT_GEOMETRY_COLOR,
         );
         return Boolean(solidId);
       });
@@ -790,7 +903,7 @@ function App() {
         solidId = addLoftFromFaces(
           draft,
           [selectedFaceIds[0], selectedFaceIds[1]],
-          activeColor,
+          DEFAULT_GEOMETRY_COLOR,
         );
         return Boolean(solidId);
       });
@@ -816,7 +929,7 @@ function App() {
           draft,
           selectedEdgeIds[0],
           selectedPointIds[0],
-          activeColor,
+          DEFAULT_GEOMETRY_COLOR,
         ),
       );
 
@@ -839,7 +952,7 @@ function App() {
         addQuadFromOppositeEdges(
           draft,
           [selectedEdgeIds[0], selectedEdgeIds[1]],
-          activeColor,
+          DEFAULT_GEOMETRY_COLOR,
         ),
       );
 
@@ -890,12 +1003,11 @@ function App() {
     }
 
     commitModel((draft) => {
-      return addPolygonFace(draft, selectedPointIds, activeColor);
+      return addPolygonFace(draft, selectedPointIds, DEFAULT_GEOMETRY_COLOR);
     });
     clearSelection();
     flashNotice("已生成面");
   }, [
-    activeColor,
     clearSelection,
     commitModel,
     flashNotice,
@@ -955,6 +1067,100 @@ function App() {
     [setActivePlaneOffset],
   );
 
+  const selectedTranslationPointIds = useMemo(
+    () =>
+      getSelectionPointIds(
+        model,
+        selectedTarget,
+        selectedPointIds,
+        selectedEdgeIds,
+        selectedFaceIds,
+      ),
+    [model, selectedEdgeIds, selectedFaceIds, selectedPointIds, selectedTarget],
+  );
+
+  const startTranslateSelection = useCallback(() => {
+    const pointIds = getSelectionPointIds(
+      modelRef.current,
+      selectedTarget,
+      selectedPointIds,
+      selectedEdgeIds,
+      selectedFaceIds,
+    );
+
+    if (pointIds.length === 0) {
+      return false;
+    }
+
+    translationStartRef.current = cloneModel(modelRef.current);
+    translationPointIdsRef.current = pointIds;
+    return true;
+  }, [selectedEdgeIds, selectedFaceIds, selectedPointIds, selectedTarget]);
+
+  const moveTranslateSelection = useCallback((delta: Vec3Tuple) => {
+    const startModel = translationStartRef.current;
+    if (!startModel) {
+      return;
+    }
+
+    const pointIds = new Set(translationPointIdsRef.current);
+    const draft = cloneModel(startModel);
+
+    for (const point of draft.points) {
+      if (!pointIds.has(point.id)) {
+        continue;
+      }
+
+      point.position = [
+        point.position[0] + delta[0],
+        point.position[1] + delta[1],
+        point.position[2] + delta[2],
+      ];
+    }
+
+    modelRef.current = draft;
+    setModel(draft);
+  }, []);
+
+  const finishTranslateSelection = useCallback(
+    (delta: Vec3Tuple) => {
+      const startModel = translationStartRef.current;
+      if (!startModel) {
+        return;
+      }
+
+      const moved = Math.hypot(delta[0], delta[1], delta[2]) > 0.0001;
+
+      if (moved) {
+        historyRef.current = [
+          ...historyRef.current.slice(-49),
+          cloneModel(startModel),
+        ];
+        setHistorySize(historyRef.current.length);
+        flashNotice("已平移");
+      } else {
+        modelRef.current = startModel;
+        setModel(startModel);
+      }
+
+      translationStartRef.current = null;
+      translationPointIdsRef.current = [];
+    },
+    [flashNotice],
+  );
+
+  const cancelTranslateSelection = useCallback(() => {
+    const startModel = translationStartRef.current;
+    if (!startModel) {
+      return;
+    }
+
+    modelRef.current = startModel;
+    setModel(startModel);
+    translationStartRef.current = null;
+    translationPointIdsRef.current = [];
+  }, []);
+
   const createPoint = useCallback(
     (position: Vec3Tuple) => {
       const snappedPosition: Vec3Tuple = snapEnabled
@@ -977,6 +1183,7 @@ function App() {
       const pointId = `p${model.nextPointId}`;
       commitModel((draft) => {
         draft.points.push({
+          color: DEFAULT_GEOMETRY_COLOR,
           id: `p${draft.nextPointId}`,
           position: snappedPosition,
         });
@@ -1002,7 +1209,7 @@ function App() {
       if (shape.tool === "sphere") {
         let solidId: string | null = null;
         const changed = commitModel((draft) => {
-          solidId = addSphereFromShape(draft, shape, activeColor);
+          solidId = addSphereFromShape(draft, shape, DEFAULT_GEOMETRY_COLOR);
           return Boolean(solidId);
         });
 
@@ -1026,6 +1233,7 @@ function App() {
         for (const position of positions) {
           const pointId = `p${draft.nextPointId}`;
           draft.points.push({
+            color: DEFAULT_GEOMETRY_COLOR,
             id: pointId,
             position,
           });
@@ -1033,7 +1241,7 @@ function App() {
           pointIds.push(pointId);
         }
 
-        faceId = createPolygonFace(draft, pointIds, activeColor);
+        faceId = createPolygonFace(draft, pointIds, DEFAULT_GEOMETRY_COLOR);
         return Boolean(faceId);
       });
 
@@ -1047,30 +1255,113 @@ function App() {
       setShapeTool("none");
       flashNotice(`已生成${SHAPE_TOOL_LABEL[shape.tool]}`);
     },
-    [activeColor, clearSelection, commitModel, flashNotice],
+    [clearSelection, commitModel, flashNotice],
   );
 
   const chooseColor = useCallback(
     (color: string) => {
       setActiveColor(color);
+      flashNotice("已选择油漆颜色");
+    },
+    [flashNotice],
+  );
 
-      if (selectedTarget?.kind !== "face") {
-        return;
+  const handleColorPickerInput = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      chooseColor(event.currentTarget.value);
+    },
+    [chooseColor],
+  );
+
+  const handleRgbInput = useCallback(
+    (channel: RgbChannel, event: ChangeEvent<HTMLInputElement>) => {
+      const rgb = hexToRgb(activeColor);
+      chooseColor(
+        rgbToHex({
+          ...rgb,
+          [channel]: clampRgbChannel(Number(event.currentTarget.value)),
+        }),
+      );
+    },
+    [activeColor, chooseColor],
+  );
+
+  const paintSelected = useCallback(() => {
+    const hasSelection =
+      Boolean(selectedTarget) ||
+      selectedPointIds.length > 0 ||
+      selectedEdgeIds.length > 0 ||
+      selectedFaceIds.length > 0;
+
+    if (!hasSelection) {
+      flashNotice("请先选择元素");
+      return;
+    }
+
+    const changed = commitModel((draft) => {
+      const pointIds = new Set(selectedPointIds);
+      const edgeIds = new Set(selectedEdgeIds);
+      const faceIds = new Set(selectedFaceIds);
+
+      if (selectedTarget?.kind === "point") {
+        pointIds.add(selectedTarget.id);
       }
 
-      commitModel((draft) => {
-        const face = draft.faces.find((item) => item.id === selectedTarget.id);
+      if (selectedTarget?.kind === "edge") {
+        edgeIds.add(selectedTarget.id);
+      }
 
-        if (!face || face.color === color) {
-          return false;
+      if (selectedTarget?.kind === "face") {
+        faceIds.add(selectedTarget.id);
+      }
+
+      if (selectedTarget?.kind === "solid") {
+        const solid = getSolidById(draft, selectedTarget.id);
+        solid?.faces.forEach((faceId) => faceIds.add(faceId));
+      }
+
+      let painted = 0;
+
+      for (const point of draft.points) {
+        if (!pointIds.has(point.id) || point.color === activeColor) {
+          continue;
         }
 
-        face.color = color;
-      });
-      flashNotice("已着色");
-    },
-    [commitModel, flashNotice, selectedTarget],
-  );
+        point.color = activeColor;
+        painted += 1;
+      }
+
+      for (const edge of draft.edges) {
+        if (!edgeIds.has(edge.id) || edge.color === activeColor) {
+          continue;
+        }
+
+        edge.color = activeColor;
+        painted += 1;
+      }
+
+      for (const face of draft.faces) {
+        if (!faceIds.has(face.id) || face.color === activeColor) {
+          continue;
+        }
+
+        face.color = activeColor;
+        painted += 1;
+      }
+
+      return painted > 0;
+    });
+
+    flashNotice(changed ? "已着色" : "颜色未变化");
+  }, [
+    activeColor,
+    commitModel,
+    flashNotice,
+    selectedEdgeIds,
+    selectedFaceIds,
+    selectedPointIds,
+    selectedTarget,
+  ]);
 
   useEffect(() => {
     modelRef.current = model;
@@ -1082,7 +1373,12 @@ function App() {
         return;
       }
 
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+      if (
+        isPrimaryModifier(event) &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "z"
+      ) {
         event.preventDefault();
         undo();
         return;
@@ -1095,11 +1391,22 @@ function App() {
       }
 
       if (event.key === "Escape") {
+        let nextNotice = "";
+
         if (shapeTool !== "none") {
           setShapeTool("none");
-          flashNotice("已退出绘制");
+          nextNotice = "已退出绘制";
         }
+
+        if (interactionTool !== "select") {
+          setInteractionTool("select");
+          nextNotice = "选择工具";
+        }
+
         clearSelection();
+        if (nextNotice) {
+          flashNotice(nextNotice);
+        }
         return;
       }
 
@@ -1110,6 +1417,20 @@ function App() {
       }
 
       if (!event.ctrlKey && !event.metaKey && !event.altKey) {
+        const key = event.key.toLowerCase();
+
+        if (key === "v") {
+          event.preventDefault();
+          chooseInteractionTool("select");
+          return;
+        }
+
+        if (key === "p") {
+          event.preventDefault();
+          chooseInteractionTool("point");
+          return;
+        }
+
         if (event.key === "1") {
           chooseConstructionPlane("xz");
         }
@@ -1134,7 +1455,7 @@ function App() {
           );
         }
 
-        if (event.key.toLowerCase() === "f") {
+        if (key === "f") {
           toggleFacesOnly();
         }
       }
@@ -1144,10 +1465,12 @@ function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     chooseConstructionPlane,
+    chooseInteractionTool,
     clearSelection,
     confirmPointSelection,
     constructionPlane,
     flashNotice,
+    interactionTool,
     planeOffsets,
     removeSelected,
     setActivePlaneOffset,
@@ -1287,18 +1610,38 @@ function App() {
     model.edges.length > 0 ||
     model.faces.length > 0 ||
     model.solids.length > 0;
+  const hasSelection =
+    Boolean(selectedTarget) ||
+    selectedPointIds.length > 0 ||
+    selectedEdgeIds.length > 0 ||
+    selectedFaceIds.length > 0;
+  const activeRgb = useMemo(() => hexToRgb(activeColor), [activeColor]);
+  const shortcutLabels = useMemo(
+    () => ({
+      boxSelect: getPrimaryDragLabel("拖拽框选"),
+      undo: getPrimaryShortcutLabel("Z"),
+    }),
+    [],
+  );
 
   return (
     <div className="app-shell">
       <Workspace3D
+        boxSelectShortcutLabel={shortcutLabels.boxSelect}
         constructionPlane={constructionPlane}
         constructionPlaneOffset={activePlaneOffset}
         facesOnly={facesOnly}
         hoveredTarget={hoveredTarget}
+        interactionTool={interactionTool}
         model={model}
         onBoxSelectPoints={boxSelectPoints}
+        onClearSelection={clearSelection}
         onCreatePoint={createPoint}
         onCreateShape={createShape}
+        onTranslateSelectionCancel={cancelTranslateSelection}
+        onTranslateSelectionEnd={finishTranslateSelection}
+        onTranslateSelectionMove={moveTranslateSelection}
+        onTranslateSelectionStart={startTranslateSelection}
         onHoverTarget={(target) => {
           if (!targetEquals(hoveredTarget, target)) {
             setHoveredTarget(target);
@@ -1308,6 +1651,7 @@ function App() {
         selectedEdgeIds={selectedEdgeIds}
         selectedFaceIds={selectedFaceIds}
         selectedPointIds={selectedPointIds}
+        selectedTranslationPointIds={selectedTranslationPointIds}
         selectedTarget={selectedTarget}
         shapeTool={shapeTool}
       />
@@ -1352,9 +1696,9 @@ function App() {
         <button
           aria-label="撤销"
           className="icon-button"
+          data-tooltip={`撤销 (${shortcutLabels.undo})`}
           disabled={historySize === 0}
           onClick={undo}
-          title="撤销"
           type="button"
         >
           <RotateCcw size={20} />
@@ -1362,14 +1706,9 @@ function App() {
         <button
           aria-label="删除"
           className="icon-button"
-          disabled={
-            !selectedTarget &&
-            selectedPointIds.length === 0 &&
-            selectedEdgeIds.length === 0 &&
-            selectedFaceIds.length === 0
-          }
+          data-tooltip="删除 (Delete / ⌫)"
+          disabled={!hasSelection}
           onClick={removeSelected}
-          title="删除"
           type="button"
         >
           <Trash2 size={20} />
@@ -1377,18 +1716,50 @@ function App() {
         <button
           aria-label="清空"
           className="icon-button"
+          data-tooltip="清空"
           disabled={!hasGeometry}
           onClick={clearScene}
-          title="清空"
           type="button"
         >
           <Eraser size={20} />
         </button>
         <button
+          aria-label="选择"
+          className={`icon-button ${
+            interactionTool === "select" && shapeTool === "none" ? "is-active" : ""
+          }`}
+          data-tooltip="选择 (V)"
+          onClick={() => chooseInteractionTool("select")}
+          type="button"
+        >
+          <MousePointer2 size={20} />
+        </button>
+        <button
+          aria-label="新增点"
+          className={`icon-button ${
+            interactionTool === "point" && shapeTool === "none" ? "is-active" : ""
+          }`}
+          data-tooltip="新增点 (P)"
+          onClick={() => chooseInteractionTool("point")}
+          type="button"
+        >
+          <CirclePlus size={20} />
+        </button>
+        <button
+          aria-label="油漆桶"
+          className="icon-button"
+          data-tooltip="油漆桶：给当前选中元素着色"
+          disabled={!hasSelection}
+          onClick={paintSelected}
+          type="button"
+        >
+          <PaintBucket size={20} />
+        </button>
+        <button
           aria-label="网格吸附"
           className={`icon-button ${snapEnabled ? "is-active" : ""}`}
+          data-tooltip="网格吸附"
           onClick={() => setSnapEnabled((enabled) => !enabled)}
-          title="网格吸附"
           type="button"
         >
           <Magnet size={20} />
@@ -1396,8 +1767,8 @@ function App() {
         <button
           aria-label="绘制圆"
           className={`icon-button ${shapeTool === "circle" ? "is-active" : ""}`}
+          data-tooltip="绘制圆"
           onClick={() => chooseShapeTool("circle")}
-          title="绘制圆"
           type="button"
         >
           <Circle size={20} />
@@ -1405,8 +1776,8 @@ function App() {
         <button
           aria-label="绘制椭圆"
           className={`icon-button ${shapeTool === "ellipse" ? "is-active" : ""}`}
+          data-tooltip="绘制椭圆"
           onClick={() => chooseShapeTool("ellipse")}
-          title="绘制椭圆"
           type="button"
         >
           <Radius size={20} />
@@ -1414,8 +1785,8 @@ function App() {
         <button
           aria-label="生成球体"
           className={`icon-button ${shapeTool === "sphere" ? "is-active" : ""}`}
+          data-tooltip="生成球体"
           onClick={() => chooseShapeTool("sphere")}
-          title="生成球体"
           type="button"
         >
           <Orbit size={20} />
@@ -1423,8 +1794,8 @@ function App() {
         <button
           aria-label="AI 生成模型"
           className="icon-button"
+          data-tooltip="AI 生成模型"
           onClick={() => setAiDialogOpen(true)}
-          title="AI 生成模型"
           type="button"
         >
           <WandSparkles size={20} />
@@ -1432,8 +1803,8 @@ function App() {
         <button
           aria-label="设置"
           className="icon-button"
+          data-tooltip="设置"
           onClick={() => setSettingsOpen(true)}
-          title="设置"
           type="button"
         >
           <Settings size={20} />
@@ -1441,8 +1812,8 @@ function App() {
         <button
           aria-label="只显示面"
           className={`icon-button ${facesOnly ? "is-active" : ""}`}
+          data-tooltip="只显示面 (F)"
           onClick={toggleFacesOnly}
-          title="只显示面"
           type="button"
         >
           <Eye size={20} />
@@ -1450,12 +1821,12 @@ function App() {
       </nav>
 
       <section className="plane-switcher" aria-label="构建平面">
-        {CONSTRUCTION_PLANES.map((plane) => (
+        {CONSTRUCTION_PLANES.map((plane, index) => (
           <button
             className={constructionPlane === plane.id ? "is-active" : ""}
             key={plane.id}
             onClick={() => chooseConstructionPlane(plane.id)}
-            title={plane.title}
+            title={`${plane.title} (${index + 1})`}
             type="button"
           >
             {plane.label}
@@ -1471,7 +1842,7 @@ function App() {
           onClick={() =>
             setActivePlaneOffset(activePlaneOffset - PLANE_OFFSET_STEP)
           }
-          title="降低构建平面"
+          title="降低构建平面 ([)"
           type="button"
         >
           <Minus size={16} />
@@ -1495,7 +1866,7 @@ function App() {
           onClick={() =>
             setActivePlaneOffset(activePlaneOffset + PLANE_OFFSET_STEP)
           }
-          title="抬高构建平面"
+          title="抬高构建平面 (])"
           type="button"
         >
           <Plus size={16} />
@@ -1504,18 +1875,44 @@ function App() {
 
       <aside className="palette-panel" aria-label="颜色">
         <Brush size={18} />
-        <div className="swatches">
-          {FACE_COLORS.map((color) => (
-            <button
-              aria-label={`颜色 ${color}`}
-              className={`swatch ${activeColor === color ? "is-active" : ""}`}
-              key={color}
-              onClick={() => chooseColor(color)}
-              style={{ backgroundColor: color }}
-              title={color}
-              type="button"
+        <div className="palette-controls">
+          <div className="swatches">
+            {FACE_COLORS.map((color) => (
+              <button
+                aria-label={`颜色 ${color}`}
+                className={`swatch ${activeColor === color ? "is-active" : ""}`}
+                key={color}
+                onClick={() => chooseColor(color)}
+                style={{ backgroundColor: color }}
+                title={color}
+                type="button"
+              />
+            ))}
+          </div>
+          <div className="rgb-picker">
+            <input
+              aria-label="RGB 取色器"
+              className="color-picker"
+              onChange={handleColorPickerInput}
+              title={activeColor}
+              type="color"
+              value={activeColor}
             />
-          ))}
+            {(["r", "g", "b"] as RgbChannel[]).map((channel) => (
+              <label className="rgb-channel" key={channel}>
+                <span>{channel.toUpperCase()}</span>
+                <input
+                  aria-label={`${channel.toUpperCase()} 色值`}
+                  max={255}
+                  min={0}
+                  onChange={(event) => handleRgbInput(channel, event)}
+                  step={1}
+                  type="number"
+                  value={activeRgb[channel]}
+                />
+              </label>
+            ))}
+          </div>
         </div>
       </aside>
 
@@ -1527,6 +1924,9 @@ function App() {
         </span>
         {shapeTool !== "none" && (
           <span className="view-label">{SHAPE_TOOL_LABEL[shapeTool]}工具</span>
+        )}
+        {shapeTool === "none" && interactionTool === "point" && (
+          <span className="view-label">新增点工具</span>
         )}
         {facesOnly && <span className="view-label">只显示面</span>}
         {selectedPointPositions.length > 0 && (

@@ -2,9 +2,13 @@ import * as THREE from "three";
 
 export type Vec3Tuple = [number, number, number];
 
+export const DEFAULT_GEOMETRY_COLOR = "#f8fafc";
+
 export type ConstructionPlane = "xz" | "xy" | "yz";
 
 export type ShapeTool = "none" | "circle" | "ellipse" | "sphere";
+
+export type InteractionTool = "select" | "point";
 
 export type ShapeDraft = {
   center: Vec3Tuple;
@@ -17,11 +21,13 @@ export type ShapeDraft = {
 export type PointNode = {
   id: string;
   position: Vec3Tuple;
+  color: string;
 };
 
 export type EdgeNode = {
   id: string;
   points: [string, string];
+  color: string;
 };
 
 export type FaceNode = {
@@ -108,12 +114,14 @@ export const createEdgeIfMissing = (
   model: SceneModel,
   a: string,
   b: string,
+  color = DEFAULT_GEOMETRY_COLOR,
 ) => {
   if (a === b || hasEdgeBetween(model, a, b)) {
     return;
   }
 
   model.edges.push({
+    color,
     id: `e${model.nextEdgeId}`,
     points: [a, b],
   });
@@ -146,7 +154,7 @@ export const polygonArea = (
 export const createPolygonFace = (
   model: SceneModel,
   ids: string[],
-  color: string,
+  color = DEFAULT_GEOMETRY_COLOR,
 ) => {
   const uniqueIds = new Set(ids);
   if (
@@ -175,7 +183,7 @@ export const createPolygonFace = (
 export const addPolygonFace = (
   model: SceneModel,
   ids: string[],
-  color: string,
+  color = DEFAULT_GEOMETRY_COLOR,
 ) => {
   return Boolean(createPolygonFace(model, ids, color));
 };
@@ -207,7 +215,7 @@ export const triangleArea = (
 export const addTriangleFace = (
   model: SceneModel,
   ids: [string, string, string],
-  color: string,
+  color = DEFAULT_GEOMETRY_COLOR,
 ) => addPolygonFace(model, ids, color);
 
 export const deleteTarget = (model: SceneModel, target: SelectionTarget) => {

@@ -7,9 +7,16 @@ import {
   isAiProvider,
   isKnownModelForProvider,
 } from "./aiModels";
+import {
+  AI_MODEL_SCHEMA_LIMITS,
+  clampAiFaceLimit,
+  DEFAULT_AI_FACE_LIMIT,
+  MIN_AI_FACE_LIMIT,
+} from "./aiSchema";
 
 export type AiSettings = {
   apiKey: string;
+  faceLimit: number;
   model: string;
   provider: AiProvider;
 };
@@ -28,6 +35,9 @@ function SettingsDialog({
   settings,
 }: SettingsDialogProps) {
   const [apiKey, setApiKey] = useState(settings.apiKey);
+  const [faceLimitInput, setFaceLimitInput] = useState(
+    String(settings.faceLimit || DEFAULT_AI_FACE_LIMIT),
+  );
   const [provider, setProvider] = useState<AiProvider>(settings.provider);
 
   useEffect(() => {
@@ -36,6 +46,7 @@ function SettingsDialog({
     }
 
     setApiKey(settings.apiKey);
+    setFaceLimitInput(String(settings.faceLimit || DEFAULT_AI_FACE_LIMIT));
     setProvider(settings.provider);
   }, [isOpen, settings]);
 
@@ -69,6 +80,7 @@ function SettingsDialog({
 
     onSave({
       apiKey: apiKey.trim(),
+      faceLimit: clampAiFaceLimit(faceLimitInput),
       model,
       provider,
     });
@@ -123,8 +135,24 @@ function SettingsDialog({
             </div>
           </label>
 
+          <label className="settings-field">
+            <span>AI 面数上限</span>
+            <input
+              max={AI_MODEL_SCHEMA_LIMITS.faces}
+              min={MIN_AI_FACE_LIMIT}
+              onChange={(event) => setFaceLimitInput(event.target.value)}
+              step={16}
+              type="number"
+              value={faceLimitInput}
+            />
+            <small>
+              控制 AI 单次生成最多多少个面。默认 {DEFAULT_AI_FACE_LIMIT}，
+              最高 {AI_MODEL_SCHEMA_LIMITS.faces}；越高生成越慢。
+            </small>
+          </label>
+
           <p className="settings-note">
-            API Key 只保存在当前浏览器。模型选择已移到 AI 生成模型窗口。
+            API Key 和面数上限只保存在当前浏览器。模型选择已移到 AI 生成模型窗口。
           </p>
 
           <div className="ai-dialog-actions">

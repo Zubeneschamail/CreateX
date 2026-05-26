@@ -2,7 +2,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import OpenAI from "openai";
 import { defineConfig, loadEnv, Plugin } from "vite";
 import react from "@vitejs/plugin-react";
-import { AI_MODEL_JSON_SCHEMA } from "./src/aiSchema";
+import {
+  clampAiFaceLimit,
+  createAiModelJsonSchema,
+} from "./src/aiSchema";
 import {
   AiProvider,
   DEFAULT_AI_PROVIDER,
@@ -23,18 +26,41 @@ const OPENROUTER_FALLBACK_MODELS = [
   "deepseek/deepseek-v3.2",
   "openai/gpt-5-mini",
 ];
+const AI_MODEL_OUTPUT_TOKEN_LIMIT = 24000;
 
 const MODEL_GENERATION_INSTRUCTIONS = [
   "你是 CreatorX 的几何模型生成器。",
-  "只生成低多边形几何模型，适合由点、线、面组成的建模草图。",
+  "生成结构清晰的中高精度几何模型，适合由点、线、面、体组成的建模草图。",
   "坐标范围必须保持在 -5 到 5，Y 轴是高度，XZ 是地面。",
   "模型应居中，底部尽量落在 Y=0，尺寸适合在 10x10 工作区查看。",
   "如果当前选中元素不为空，应优先把这些点、线、面作为位置、尺度或连接关系参考。",
   "除非用户明确要求替换，否则不要假设选中元素会被删除；生成结果应能与当前上下文自然衔接。",
-  "faces 的 points 必须按外轮廓顺序排列。",
-  "edges 可以包含关键线段，faces 会自动补齐边界线。",
+  "拓扑结构必须严格按 points -> edges -> faces -> solids 输出。",
+  "每个 edge 必须有唯一 id，例如 e1、e2，并通过两个 point id 定义线段。",
+  "每个 face 必须有唯一 id，例如 f1、f2，并通过 edges 字段引用一圈有序 edge id。",
+  "face.edges 中相邻 edge 必须共享端点，最后一个 edge 必须回到第一个 edge，形成闭合外轮廓。",
+  "不要在 face 内输出 points 字段；程序会从 face.edges 自动还原面顶点顺序。",
+  "同一条几何线只创建一个 edge；相邻面共享同一个 edge id，不要重复创建重合线段。",
+  "不要把对角线、辅助线或内部线放进 face.edges；face.edges 只包含该面的边界线。",
+  "solids 必须通过 face id 引用组成自己的闭合外壳。",
+  "当用户要求立方体、金字塔、棱柱、房子、球体或任何三维对象时，应输出对应 solids；开放曲面或单张面才使用空 solids。",
+  "圆、圆柱、圆锥、拱形、轮子、球体等曲面结构必须用分段边界表达，不要只用四边形粗略代替。",
+  "门、窗、烟囱、屋檐、凹槽、台阶、倒角等局部结构应建成独立的点线面，而不是只写在 summary 里。",
+  "不要为了增加数量切碎完全平直且没有结构意义的大面；精细度应该服务于轮廓、比例和局部特征。",
+  "立方体参考拓扑：8 个 points、12 个 edges、6 个 faces、1 个 solid；更复杂物体应明显高于这个数量。",
   "不要输出解释文字，只返回符合 JSON Schema 的数据。",
 ].join("\n");
+
+type AiDetailLevel = "standard" | "high" | "ultra";
+
+const DETAIL_LEVEL_INSTRUCTIONS: Record<AiDetailLevel, string> = {
+  standard:
+    "精细度：标准。适合快速草图；简单体块保持简洁，曲线或圆形使用 8-12 段。",
+  high:
+    "精细度：高。默认目标是表达清楚轮廓和局部结构；曲线、圆柱和球体使用 16-24 段，复杂物体优先使用 120-420 个点、180-820 条线、60-360 个面。",
+  ultra:
+    "精细度：极高。尽量表达倒角、孔洞、层级和附属结构；球体可达到约 512 面，复杂模型可接近 schema 上限，但仍保持拓扑闭合和可读。",
+};
 
 type OpenRouterContent =
   | string
@@ -151,13 +177,20 @@ const getRequestedModel = (
   );
 };
 
+const getDetailLevel = (value: unknown): AiDetailLevel =>
+  value === "standard" || value === "ultra" ? value : "high";
+
 const createUserPrompt = (
   prompt: string,
   currentScene: string,
   selectionContext: string,
+  detailLevel: AiDetailLevel,
+  faceLimit: number,
 ) =>
   [
     `用户想生成的模型：${prompt}`,
+    DETAIL_LEVEL_INSTRUCTIONS[detailLevel],
+    `AI 面数上限：最多生成 ${faceLimit} 个 faces，solids 引用的 faces 总数也不能超过这个上限。`,
     `当前场景统计：${currentScene}`,
     `当前选中元素上下文：${selectionContext}`,
   ].join("\n");
@@ -227,25 +260,35 @@ const generateWithOpenAi = async (
   prompt: string,
   currentScene: string,
   selectionContext: string,
+  detailLevel: AiDetailLevel,
+  faceLimit: number,
 ) => {
   const client = new OpenAI({ apiKey });
+  const schema = createAiModelJsonSchema(faceLimit);
   const aiResponse = await client.responses.create({
     input: [
       {
         role: "user",
-        content: createUserPrompt(prompt, currentScene, selectionContext),
+        content: createUserPrompt(
+          prompt,
+          currentScene,
+          selectionContext,
+          detailLevel,
+          faceLimit,
+        ),
       },
     ],
     instructions: MODEL_GENERATION_INSTRUCTIONS,
+    max_output_tokens: AI_MODEL_OUTPUT_TOKEN_LIMIT,
     model,
     text: {
       format: {
         name: "creatorx_model",
-        schema: AI_MODEL_JSON_SCHEMA,
+        schema,
         strict: true,
         type: "json_schema",
       },
-      verbosity: "low",
+      verbosity: "medium",
     },
   });
 
@@ -265,16 +308,26 @@ const requestOpenRouterModel = async (
   prompt: string,
   currentScene: string,
   selectionContext: string,
+  detailLevel: AiDetailLevel,
+  faceLimit: number,
 ) => {
+  const schema = createAiModelJsonSchema(faceLimit);
   const upstreamResponse = await fetch(OPENROUTER_CHAT_COMPLETIONS_URL, {
     body: JSON.stringify({
+      max_tokens: AI_MODEL_OUTPUT_TOKEN_LIMIT,
       messages: [
         {
           content: MODEL_GENERATION_INSTRUCTIONS,
           role: "system",
         },
         {
-          content: createUserPrompt(prompt, currentScene, selectionContext),
+          content: createUserPrompt(
+            prompt,
+            currentScene,
+            selectionContext,
+            detailLevel,
+            faceLimit,
+          ),
           role: "user",
         },
       ],
@@ -285,7 +338,7 @@ const requestOpenRouterModel = async (
       response_format: {
         json_schema: {
           name: "creatorx_model",
-          schema: AI_MODEL_JSON_SCHEMA,
+          schema,
           strict: true,
         },
         type: "json_schema",
@@ -343,6 +396,8 @@ const generateWithOpenRouter = async (
   prompt: string,
   currentScene: string,
   selectionContext: string,
+  detailLevel: AiDetailLevel,
+  faceLimit: number,
 ) => {
   const failures: string[] = [];
   const candidateModels = getOpenRouterCandidateModels(model);
@@ -355,6 +410,8 @@ const generateWithOpenRouter = async (
         prompt,
         currentScene,
         selectionContext,
+        detailLevel,
+        faceLimit,
       );
     } catch (error) {
       const message =
@@ -392,6 +449,8 @@ const handleAiModelRequest =
         typeof body.prompt === "string" ? body.prompt.trim().slice(0, 1200) : "";
       const requestedModel =
         typeof body.model === "string" ? body.model.trim().slice(0, 80) : "";
+      const detailLevel = getDetailLevel(body.detailLevel);
+      const faceLimit = clampAiFaceLimit(body.faceLimit);
       const model = getRequestedModel(provider, env, requestedModel);
 
       if (!apiKey) {
@@ -423,6 +482,8 @@ const handleAiModelRequest =
               prompt,
               currentScene,
               selectionContext,
+              detailLevel,
+              faceLimit,
             )
           : await generateWithOpenAi(
               apiKey,
@@ -430,6 +491,8 @@ const handleAiModelRequest =
               prompt,
               currentScene,
               selectionContext,
+              detailLevel,
+              faceLimit,
             );
 
       sendJson(response, 200, {
