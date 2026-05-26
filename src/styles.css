@@ -45,12 +45,31 @@ button {
   display: block;
   width: 100%;
   height: 100%;
+  cursor: url("/cursors/select.svg") 6 4, default;
   outline: none;
 }
 
-.workspace.is-box-selecting canvas,
-.workspace.is-point-tool canvas,
-.workspace.is-shape-tool canvas {
+.workspace[data-tool="point"] canvas {
+  cursor: url("/cursors/point.svg") 16 16, crosshair;
+}
+
+.workspace[data-tool="paint"] canvas {
+  cursor: url("/cursors/paint.svg") 6 24, pointer;
+}
+
+.workspace[data-tool="circle"] canvas {
+  cursor: url("/cursors/circle.svg") 16 16, crosshair;
+}
+
+.workspace[data-tool="ellipse"] canvas {
+  cursor: url("/cursors/ellipse.svg") 16 16, crosshair;
+}
+
+.workspace[data-tool="sphere"] canvas {
+  cursor: url("/cursors/sphere.svg") 16 16, crosshair;
+}
+
+.workspace.is-box-selecting canvas {
   cursor: crosshair;
 }
 

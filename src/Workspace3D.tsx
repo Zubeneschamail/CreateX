@@ -31,6 +31,7 @@ type WorkspaceProps = {
   onCreatePoint: (position: Vec3Tuple) => void;
   onCreateShape: (shape: ShapeDraft) => void;
   onHoverTarget: (target: SelectionTarget | null) => void;
+  onPaintTarget: (target: SelectionTarget) => void;
   onSelectTarget: (target: SelectionTarget) => void;
   onTranslateSelectionCancel: () => void;
   onTranslateSelectionEnd: (delta: Vec3Tuple) => void;
@@ -466,6 +467,7 @@ function Workspace3D({
   onCreatePoint,
   onCreateShape,
   onHoverTarget,
+  onPaintTarget,
   onSelectTarget,
   onTranslateSelectionCancel,
   onTranslateSelectionEnd,
@@ -491,6 +493,7 @@ function Workspace3D({
     onCreatePoint,
     onCreateShape,
     onHoverTarget,
+    onPaintTarget,
     onSelectTarget,
     onTranslateSelectionCancel,
     onTranslateSelectionEnd,
@@ -509,6 +512,7 @@ function Workspace3D({
     onCreatePoint,
     onCreateShape,
     onHoverTarget,
+    onPaintTarget,
     onSelectTarget,
     onTranslateSelectionCancel,
     onTranslateSelectionEnd,
@@ -926,7 +930,16 @@ function Workspace3D({
         propsRef.current.model,
       );
       if (target) {
-        propsRef.current.onSelectTarget(target);
+        if (propsRef.current.interactionTool === "paint") {
+          propsRef.current.onPaintTarget(target);
+        } else {
+          propsRef.current.onSelectTarget(target);
+        }
+        return;
+      }
+
+      if (propsRef.current.interactionTool === "paint") {
+        propsRef.current.onHoverTarget(null);
         return;
       }
 
@@ -1188,8 +1201,11 @@ function Workspace3D({
       className={`workspace ${selectionBox ? "is-box-selecting" : ""} ${
         shapeTool !== "none" ? "is-shape-tool" : ""
       } ${interactionTool === "point" ? "is-point-tool" : ""} ${
+        interactionTool === "paint" ? "is-paint-tool" : ""
+      } ${
         isTranslating ? "is-translating" : ""
       }`}
+      data-tool={shapeTool !== "none" ? shapeTool : interactionTool}
       ref={rootRef}
       title={boxSelectShortcutLabel}
     >

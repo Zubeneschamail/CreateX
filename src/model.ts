@@ -8,7 +8,7 @@ export type ConstructionPlane = "xz" | "xy" | "yz";
 
 export type ShapeTool = "none" | "circle" | "ellipse" | "sphere";
 
-export type InteractionTool = "select" | "point";
+export type InteractionTool = "select" | "point" | "paint";
 
 export type ShapeDraft = {
   center: Vec3Tuple;

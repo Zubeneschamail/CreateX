@@ -623,7 +623,12 @@ function App() {
     (tool: InteractionTool) => {
       setInteractionTool(tool);
       setShapeTool("none");
-      flashNotice(tool === "select" ? "选择工具" : "新增点工具");
+      const toolLabels: Record<InteractionTool, string> = {
+        paint: "油漆桶工具",
+        point: "新增点工具",
+        select: "选择工具",
+      };
+      flashNotice(toolLabels[tool]);
     },
     [flashNotice],
   );
@@ -1286,37 +1291,26 @@ function App() {
     [activeColor, chooseColor],
   );
 
-  const paintSelected = useCallback(() => {
-    const hasSelection =
-      Boolean(selectedTarget) ||
-      selectedPointIds.length > 0 ||
-      selectedEdgeIds.length > 0 ||
-      selectedFaceIds.length > 0;
-
-    if (!hasSelection) {
-      flashNotice("请先选择元素");
-      return;
-    }
-
+  const paintTarget = useCallback((target: SelectionTarget) => {
     const changed = commitModel((draft) => {
-      const pointIds = new Set(selectedPointIds);
-      const edgeIds = new Set(selectedEdgeIds);
-      const faceIds = new Set(selectedFaceIds);
+      const pointIds = new Set<string>();
+      const edgeIds = new Set<string>();
+      const faceIds = new Set<string>();
 
-      if (selectedTarget?.kind === "point") {
-        pointIds.add(selectedTarget.id);
+      if (target.kind === "point") {
+        pointIds.add(target.id);
       }
 
-      if (selectedTarget?.kind === "edge") {
-        edgeIds.add(selectedTarget.id);
+      if (target.kind === "edge") {
+        edgeIds.add(target.id);
       }
 
-      if (selectedTarget?.kind === "face") {
-        faceIds.add(selectedTarget.id);
+      if (target.kind === "face") {
+        faceIds.add(target.id);
       }
 
-      if (selectedTarget?.kind === "solid") {
-        const solid = getSolidById(draft, selectedTarget.id);
+      if (target.kind === "solid") {
+        const solid = getSolidById(draft, target.id);
         solid?.faces.forEach((faceId) => faceIds.add(faceId));
       }
 
@@ -1353,15 +1347,7 @@ function App() {
     });
 
     flashNotice(changed ? "已着色" : "颜色未变化");
-  }, [
-    activeColor,
-    commitModel,
-    flashNotice,
-    selectedEdgeIds,
-    selectedFaceIds,
-    selectedPointIds,
-    selectedTarget,
-  ]);
+  }, [activeColor, commitModel, flashNotice]);
 
   useEffect(() => {
     modelRef.current = model;
@@ -1428,6 +1414,12 @@ function App() {
         if (key === "p") {
           event.preventDefault();
           chooseInteractionTool("point");
+          return;
+        }
+
+        if (key === "b") {
+          event.preventDefault();
+          chooseInteractionTool("paint");
           return;
         }
 
@@ -1647,6 +1639,7 @@ function App() {
             setHoveredTarget(target);
           }
         }}
+        onPaintTarget={paintTarget}
         onSelectTarget={selectTarget}
         selectedEdgeIds={selectedEdgeIds}
         selectedFaceIds={selectedFaceIds}
@@ -1747,10 +1740,11 @@ function App() {
         </button>
         <button
           aria-label="油漆桶"
-          className="icon-button"
-          data-tooltip="油漆桶：给当前选中元素着色"
-          disabled={!hasSelection}
-          onClick={paintSelected}
+          className={`icon-button ${
+            interactionTool === "paint" && shapeTool === "none" ? "is-active" : ""
+          }`}
+          data-tooltip="油漆桶：点击元素着色 (B)"
+          onClick={() => chooseInteractionTool("paint")}
           type="button"
         >
           <PaintBucket size={20} />
@@ -1927,6 +1921,9 @@ function App() {
         )}
         {shapeTool === "none" && interactionTool === "point" && (
           <span className="view-label">新增点工具</span>
+        )}
+        {shapeTool === "none" && interactionTool === "paint" && (
+          <span className="view-label">油漆桶工具</span>
         )}
         {facesOnly && <span className="view-label">只显示面</span>}
         {selectedPointPositions.length > 0 && (
