@@ -549,10 +549,13 @@ function Workspace3D({
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
+    controls.enablePan = true;
+    controls.screenSpacePanning = true;
     controls.target.set(0, 0, 0);
-    controls.minDistance = 2.2;
-    controls.maxDistance = 16;
-    controls.maxPolarAngle = Math.PI * 0.48;
+    controls.minDistance = 0.4;
+    controls.maxDistance = 80;
+    controls.minPolarAngle = 0;
+    controls.maxPolarAngle = Math.PI;
 
     const ambientLight = new THREE.HemisphereLight("#f8fafc", "#262626", 1.9);
     scene.add(ambientLight);
