@@ -93,7 +93,7 @@ function SettingsDialog({
         <header className="ai-dialog-header">
           <div>
             <h2>设置</h2>
-            <p>配置本地 AI 生成所需的服务商和 Key。</p>
+            <p>配置当前浏览器使用的 AI 服务商和 Key。</p>
           </div>
           <button
             aria-label="关闭设置"
